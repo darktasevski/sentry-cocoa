@@ -1,3 +1,4 @@
+// swiftlint:disable file_length
 import Foundation
 import ObjectiveC
 
@@ -224,6 +225,10 @@ extension Options {
 
         if let enablePreWarmedAppStartTracing = boolValue(dictionary["enablePreWarmedAppStartTracing"]) {
             self.enablePreWarmedAppStartTracing = enablePreWarmedAppStartTracing
+        }
+
+        if let enableUIUpdateLinkFramesTracking = boolValue(dictionary["enableUIUpdateLinkFramesTracking"]) {
+            self.experimental.enableUIUpdateLinkFramesTracking = enableUIUpdateLinkFramesTracking
         }
 
         #if !SDK_V10
