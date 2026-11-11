@@ -46,8 +46,8 @@ if !enableV10 {
     targets += [
         .binaryTarget(
             name: "Sentry",
-            url: "https://github.com/getsentry/sentry-cocoa/releases/download/9.24.0/Sentry.xcframework.zip",
-            checksum: "c530edd27b20f7c151e73d84a34ee03474e3d5ddab65ffe9d30366f80149668a" //Sentry-Static
+            url: "https://github.com/darktasevski/sentry-cocoa/releases/download/reader-consent-13c3d7e2d939/Sentry-13c3d7e2d939-f8a2175e6dd9573d.xcframework.zip",
+            checksum: "f8a2175e6dd9573d36562011f5edea8270788cf4a3600e3c14da47d3abc12884" //Sentry-Static
         ),
         .binaryTarget(
             name: "Sentry-Dynamic",
