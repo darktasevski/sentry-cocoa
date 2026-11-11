@@ -59,6 +59,8 @@ SENTRY_NO_INIT
 
 - (void)flush:(NSTimeInterval)timeout;
 
+- (void)close;
+
 @end
 
 NS_ASSUME_NONNULL_END

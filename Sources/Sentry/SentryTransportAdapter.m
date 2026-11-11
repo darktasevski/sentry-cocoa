@@ -119,6 +119,13 @@ NS_ASSUME_NONNULL_BEGIN
     }
 }
 
+- (void)close
+{
+    for (id<SentryTransport> transport in self.transports) {
+        [transport close];
+    }
+}
+
 - (NSMutableArray<SentryEnvelopeItem *> *)buildEnvelopeItems:(SentryEvent *)event
                                                  attachments:
                                                      (NSArray<SentryAttachment *> *)attachments

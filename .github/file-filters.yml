@@ -67,6 +67,7 @@ run_api_stability_for_prs: &run_api_stability_for_prs
   # GH Actions
   - ".github/workflows/api-stability.yml"
   - ".github/file-filters.yml"
+  - ".github/actions/setup-xcode/**"
 
   # Project files
   - "Sentry.xcworkspace/**"
@@ -77,6 +78,10 @@ run_api_stability_for_prs: &run_api_stability_for_prs
   - "scripts/build-xcframework-slice.sh"
   - "scripts/assemble-xcframework.sh"
   - "scripts/update-api.sh"
+  - "scripts/ci-select-xcode.sh"
+  - "scripts/extract-swift-api.sh"
+  - "scripts/tests/test-extract-swift-api.sh"
+  - "scripts/tests/fixtures/mixed-api/**"
   - "scripts/extract-objc-api.sh"
   - "scripts/ci-diagnostics.sh"
 

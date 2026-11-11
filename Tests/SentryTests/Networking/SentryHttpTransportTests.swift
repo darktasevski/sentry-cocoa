@@ -164,7 +164,8 @@ class SentryHttpTransportTests: XCTestCase {
         func getSut(
             fileManager: SentryFileManager? = nil,
             dispatchQueueWrapper: SentryDispatchQueueWrapper? = nil,
-            reachability: SentryReachability? = nil
+            reachability: SentryReachability? = nil,
+            requestManager: RequestManager? = nil
         ) throws -> Transport {
             return SentryHttpTransport(
                 dsn: try XCTUnwrap(options.parsedDsn),
@@ -172,7 +173,7 @@ class SentryHttpTransportTests: XCTestCase {
                 cachedEnvelopeSendDelay: 0.0,
                 dateProvider: currentDateProvider,
                 fileManager: fileManager ?? self.fileManager,
-                requestManager: requestManager,
+                requestManager: requestManager ?? self.requestManager,
                 requestBuilder: requestBuilder,
                 rateLimits: rateLimits,
                 envelopeRateLimit: EnvelopeRateLimit(rateLimits: rateLimits),
@@ -1197,6 +1198,21 @@ class SentryHttpTransportTests: XCTestCase {
 
         wait(for: [expectation], timeout: 10.0)
 
+    }
+
+    func testClose_whenLateCachedSendArrives_shouldSealRealRequestManager() throws {
+        let session = CloseSealRecordingSession()
+        defer { session.invalidateAndCancel() }
+        let manager = SentryQueueableRequestManager(session: session)
+        let sut = try fixture.getSut(requestManager: manager)
+        guard closeForSealTest(sut) else { return }
+        session.markCloseReturned()
+
+        sut.send(envelope: fixture.eventEnvelope)
+
+        XCTAssertEqual(session.recordedTasks.count, 0)
+        XCTAssertEqual(session.recordedTasksCreatedAfterClose.count, 0)
+        XCTAssertEqual(session.invalidationCalls.count, 0)
     }
     
     func testFlush_BlocksCallingThread_FinishesFlushingWhenSent() {

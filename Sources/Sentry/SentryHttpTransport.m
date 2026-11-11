@@ -238,6 +238,11 @@
     }
 }
 
+- (void)close
+{
+    [self.requestManager close];
+}
+
 /**
  * SentryEnvelopeRateLimitDelegate.
  */

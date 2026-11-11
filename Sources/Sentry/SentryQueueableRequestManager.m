@@ -8,6 +8,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic, strong) NSOperationQueue *queue;
 @property (nonatomic, strong) NSURLSession *session;
+@property (nonatomic) BOOL closed;
 
 @end
 
@@ -48,16 +49,43 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)addRequest:(NSURLRequest *)request
     completionHandler:(_Nullable SentryRequestOperationFinished)completionHandler
 {
-    SentryRequestOperation *operation = [[SentryRequestOperation alloc]
-          initWithSession:self.session
-                  request:request
-        completionHandler:^(NSHTTPURLResponse *_Nullable response, NSError *_Nullable error) {
-            SENTRY_LOG_DEBUG(@"Queued requests: %@", @(self.queue.operationCount - 1));
-            if (completionHandler) {
-                completionHandler(response, error);
-            }
-        }];
-    [self.queue addOperation:operation];
+    @synchronized(self) {
+        if (!_closed) {
+            // The operation initializer creates its URLSession task, so construction and enqueue
+            // must share the close seal's lock.
+            SentryRequestOperation *operation = [[SentryRequestOperation alloc]
+                  initWithSession:self.session
+                          request:request
+                completionHandler:^(
+                    NSHTTPURLResponse *_Nullable response, NSError *_Nullable error) {
+                    SENTRY_LOG_DEBUG(@"Queued requests: %@", @(self.queue.operationCount - 1));
+                    if (completionHandler) {
+                        completionHandler(response, error);
+                    }
+                }];
+            [self.queue addOperation:operation];
+            return;
+        }
+    }
+
+    if (completionHandler) {
+        completionHandler(
+            nil, [NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil]);
+    }
+}
+
+- (void)close
+{
+    NSArray<NSOperation *> *operations;
+    @synchronized(self) {
+        _closed = YES;
+        operations = self.queue.operations;
+    }
+
+    // Cancellation may invoke completion handlers; keep it outside the admission lock.
+    for (NSOperation *operation in operations) {
+        [operation cancel];
+    }
 }
 
 @end

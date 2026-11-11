@@ -30,6 +30,11 @@ import Foundation
         return .success
     }
 
+    public var closeInvocations = Invocations<Void>()
+    @objc public func close() {
+        closeInvocations.record(())
+    }
+
     public func setStartFlushCallback(_ callback: @escaping () -> Void) {
 
     }

@@ -29,6 +29,8 @@ public protocol Transport: NSObjectProtocol {
     @objc(flush:)
     func flush(_ timeout: TimeInterval) -> SentryFlushResult
 
+    @objc func close()
+
     #if DEBUG || SENTRY_TEST || SENTRY_TEST_CI
     @objc(setStartFlushCallback:)
     func setStartFlushCallback(_ callback: @escaping () -> Void)

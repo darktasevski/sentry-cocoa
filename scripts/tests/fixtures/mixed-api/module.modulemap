@@ -1,0 +1,5 @@
+framework module MixedAPI {
+    umbrella header "MixedAPI.h"
+    export *
+    module * { export * }
+}

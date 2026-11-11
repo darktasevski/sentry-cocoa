@@ -12,6 +12,7 @@ typealias AutoBreadcrumbTrackingIntegrationProvider = FileManagerProvider
 
 final class SentryAutoBreadcrumbTrackingIntegration<Dependencies: AutoBreadcrumbTrackingIntegrationProvider>: NSObject, SwiftIntegration, SentryBreadcrumbDelegate {
     private var breadcrumbTracker: SentryBreadcrumbTracker?
+    private weak var hub: SentryHubInternal?
 
     #if os(iOS) && !SENTRY_NO_UI_FRAMEWORK
     private var systemEventBreadcrumbs: SentrySystemEventBreadcrumbs?
@@ -28,6 +29,7 @@ final class SentryAutoBreadcrumbTrackingIntegration<Dependencies: AutoBreadcrumb
             return nil
         }
 
+        hub = SentrySDKInternal.currentHub()
         super.init()
 
         // Create breadcrumb tracker
@@ -75,6 +77,7 @@ final class SentryAutoBreadcrumbTrackingIntegration<Dependencies: AutoBreadcrumb
 
     @objc(addBreadcrumb:)
     func add(_ crumb: Breadcrumb) {
-        SentrySDKInternal.addBreadcrumb(crumb)
+        guard let hub, let client = hub.getClient(), client.isEnabled else { return }
+        hub.add(crumb)
     }
 }

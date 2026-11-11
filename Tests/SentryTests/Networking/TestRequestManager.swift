@@ -12,6 +12,11 @@ class TestRequestManager: NSObject, RequestManager {
     var isReady: Bool
     
     var requests = Invocations<URLRequest>()
+    var closeInvocations = Invocations<Void>()
+
+    @objc func close() {
+        closeInvocations.record(())
+    }
     
     private let queue = DispatchQueue(label: "TestRequestManager")
     private let group = DispatchGroup()

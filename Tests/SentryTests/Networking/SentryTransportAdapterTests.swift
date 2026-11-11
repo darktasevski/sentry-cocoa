@@ -48,6 +48,13 @@ class SentryTransportAdapterTests: XCTestCase {
         try assertSentEnvelope(expected: expectedEnvelope)
     }
 
+    func testClose_whenMultipleTransports_shouldCloseEveryTransport() {
+        guard closeForSealTest(sut) else { return }
+
+        XCTAssertEqual(fixture.transport1.closeInvocations.count, 1)
+        XCTAssertEqual(fixture.transport2.closeInvocations.count, 1)
+    }
+
     func testSendFaultyAttachment_FaultyAttachmentGetsDropped() throws {
         let event = TestData.event
         sut.send(event: event, traceContext: nil, attachments: [fixture.faultyAttachment, fixture.attachment])

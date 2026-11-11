@@ -17,6 +17,7 @@ final class SentryHangTrackingIntegration<Dependencies: HangTrackingIntegrationS
     private let debugImageProvider: SentryDebugImageProvider
     private let threadInspector: SentryThreadInspector
     private let reportAppHangs = SentryMutex<Bool>(true)
+    private weak var hub: SentryHubInternal?
     #if (os(iOS) || os(tvOS) || os(visionOS)) && !SENTRY_NO_UI_FRAMEWORK
     let enableReportNonFullyBlockingAppHangs: Bool
     #endif
@@ -46,6 +47,7 @@ final class SentryHangTrackingIntegration<Dependencies: HangTrackingIntegrationS
         self.debugImageProvider = dependencies.debugImageProvider
         self.threadInspector = dependencies.threadInspector
         self.options = options
+        self.hub = SentrySDKInternal.currentHub()
         #if (os(iOS) || os(tvOS) || os(visionOS)) && !SENTRY_NO_UI_FRAMEWORK
         enableReportNonFullyBlockingAppHangs = options.enableReportNonFullyBlockingAppHangs
         #endif
@@ -115,15 +117,17 @@ final class SentryHangTrackingIntegration<Dependencies: HangTrackingIntegrationS
 
         event.debugMeta = debugImageProvider.getDebugImagesFromCacheForThreads(threads: threads)
 
+        guard let hub, let client = hub.getClient(), client.isEnabled else { return }
+
         #if (os(iOS) || os(tvOS) || os(visionOS)) && !SENTRY_NO_UI_FRAMEWORK
         mechanism.data = [sentryANRMechanismDataAppHangDuration: appHangDurationInfo]
-        let scope = SentrySDKInternal.currentHub().scope
+        let scope = hub.scope
         scope.applyTo(event: event, maxBreadcrumbs: options.maxBreadcrumbs)
         addAppState(to: event)
-        apply(options: SentryDependencyContainer.sharedInstance().startOptions, toEvent: event)
+        apply(options: options, toEvent: event)
         fileManager.storeAppHang(event)
         #else
-        SentrySDK.capture(event: event)
+        hub.capture(event: event)
         #endif
     }
 
@@ -158,7 +162,8 @@ final class SentryHangTrackingIntegration<Dependencies: HangTrackingIntegrationS
         }
         mechanismData.removeValue(forKey: sentryANRMechanismDataAppHangDuration)
         event.exceptions?.first?.mechanism?.data = mechanismData
-        SentrySDK.capture(event: event, scope: Scope())
+        guard let hub, let client = hub.getClient(), client.isEnabled else { return }
+        hub.capture(event: event, scope: Scope())
         #endif
     }
 
@@ -177,8 +182,9 @@ final class SentryHangTrackingIntegration<Dependencies: HangTrackingIntegrationS
             guard let self else { return }
             guard let event = fileManager.readAppHangEvent() else { return }
             fileManager.deleteAppHangEvent()
+            guard let hub, let client = hub.getClient(), client.isEnabled else { return }
             if crashWrapper.crashedLastLaunch {
-                SentrySDK.capture(event: event, scope: Scope())
+                hub.capture(event: event, scope: Scope())
             } else {
                 if event.exceptions?.count != 1 {
                     SentrySDKLog.warning("The stored app hang event is expected to have exactly one exception, so we don't capture it.")
@@ -197,7 +203,7 @@ final class SentryHangTrackingIntegration<Dependencies: HangTrackingIntegrationS
                 event.exceptions?.first?.mechanism?.data = mechanismData
                 let exceptionValue = "The user or the OS watchdog terminated your app while it blocked the main thread for \(appHangDurationInfo ?? "?")."
                 event.exceptions?.first?.value = exceptionValue
-                SentrySDKInternal.captureFatalAppHang(event)
+                hub.captureFatalAppHang(event)
             }
         }
     }

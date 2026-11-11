@@ -9,5 +9,8 @@ public protocol RequestManager: NSObjectProtocol {
 
     @objc(addRequest:completionHandler:)
     func add(_ request: URLRequest, completionHandler: SentryRequestOperationFinished?)
+
+    /// Seals request admission and cancels admitted requests without invalidating the session.
+    @objc func close()
 }
 // swiftlint:enable missing_docs

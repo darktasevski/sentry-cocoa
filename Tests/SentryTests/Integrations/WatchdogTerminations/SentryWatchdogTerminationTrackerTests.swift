@@ -4,6 +4,17 @@ import XCTest
 
 #if os(iOS) || os(tvOS)
 class SentryWatchdogTerminationTrackerTests: NotificationCenterTestCase {
+
+    private final class EnteredWatchdogFileManager: SentryFileManager {
+        var onBreadcrumbRead: (() -> Void)?
+
+        override func readPreviousBreadcrumbs() -> [Any] {
+            let callback = onBreadcrumbRead
+            onBreadcrumbRead = nil
+            callback?()
+            return super.readPreviousBreadcrumbs()
+        }
+    }
     
     private static let dsnAsString = TestConstants.dsnAsString(username: "SentryOutOfMemoryTrackerTests")
     
@@ -110,6 +121,59 @@ class SentryWatchdogTerminationTrackerTests: NotificationCenterTestCase {
         XCTAssertEqual(appState, actual)
         
         XCTAssertGreaterThanOrEqual(fixture.dispatchQueue.dispatchAsyncCalled, 1, "Expected at least 1 dispatchAsync call for start to ensure we don't run reading the app state on the calling thread.")
+    }
+
+    func testWatchdogCapture_whenOwnerClosedDuringEnteredCallback_shouldNotCaptureInReplacement() throws {
+        try assertWatchdogOwnership(closeOwner: true)
+    }
+
+    func testWatchdogCapture_whenOwnerEligibleAndGlobalHubChanges_shouldCaptureOnOwner() throws {
+        try assertWatchdogOwnership(closeOwner: false)
+    }
+
+    func testWatchdogCapture_whenOwnerClientClosedButStillBound_shouldDrop() throws {
+        try assertWatchdogOwnership(closeOwner: true, unbindOwner: false)
+    }
+
+    private func assertWatchdogOwnership(closeOwner: Bool, unbindOwner: Bool = true) throws {
+        let owner = SentrySDKInternal.currentHub()
+        owner.scope.setTag(value: "owner", key: "lifetime")
+        let replacementClient = try XCTUnwrap(TestClient(options: fixture.options))
+        let replacement = SentryHubInternal(client: replacementClient, andScope: Scope())
+        replacement.scope.setTag(value: "replacement", key: "lifetime")
+        let manager = EnteredWatchdogFileManager(
+            helper: try SentryFileManagerHelper(options: fixture.options),
+            dateProvider: fixture.currentDate,
+            dispatchQueueWrapper: fixture.dispatchQueue
+        )
+        sut = try fixture.getSut(fileManager: manager)
+        sut.start()
+        goToForeground()
+        manager.moveAppStateToPreviousAppState()
+        var entered = false
+        manager.onBreadcrumbRead = {
+            entered = true
+            if closeOwner {
+                owner.close()
+                if unbindOwner { owner.bindClient(nil) }
+            }
+            SentrySDKInternal.setCurrentHub(replacement)
+        }
+
+        sut.start()
+
+        XCTAssertTrue(entered, "The A watchdog callback must enter before the lifetime handoff")
+        XCTAssertEqual(replacementClient.captureFatalEventInvocations.count, 0, "Entered A watchdog capture must never use B")
+        XCTAssertEqual(fixture.client.captureFatalEventInvocations.count, closeOwner ? 0 : 1)
+        if !closeOwner {
+            XCTAssertEqual(fixture.client.captureFatalEventInvocations.first?.scope.tags["lifetime"], "owner")
+        }
+
+        sut.stop()
+        sut = try fixture.getSut(fileManager: manager)
+        sut.start()
+        XCTAssertEqual(replacementClient.captureFatalEventInvocations.count, 1, "Fresh B watchdog capture must remain enabled")
+        XCTAssertEqual(replacementClient.captureFatalEventInvocations.first?.scope.tags["lifetime"], "replacement")
     }
     
     func testGoToForeground_SetsIsActive() throws {

@@ -60,6 +60,10 @@ import Foundation
         return .success
     }
 
+    public func close() {
+        requestManager.close()
+    }
+
     public func recordLostEvent(_ category: SentryDataCategory, reason: SentryDiscardReason) {
         // Empty on purpose
     }

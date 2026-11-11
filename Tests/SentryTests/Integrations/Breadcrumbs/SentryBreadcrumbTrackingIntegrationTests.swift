@@ -4,6 +4,17 @@
 import XCTest
 
 class SentryBreadcrumbTrackingIntegrationTests: XCTestCase {
+
+    private final class EnteredBreadcrumbHub: SentryHubInternal {
+        var onClientRead: (() -> Void)?
+
+        override func getClient() -> SentryClientInternal? {
+            let callback = onClientRead
+            onClientRead = nil
+            callback?()
+            return super.getClient()
+        }
+    }
     
     private class Fixture {
         private let dateProvider = TestCurrentDateProvider()
@@ -67,14 +78,14 @@ class SentryBreadcrumbTrackingIntegrationTests: XCTestCase {
     }
     
     func testInstall() throws {
+        let scope = Scope()
+        let hub = SentryHubInternal(client: TestClient(options: Options()), andScope: scope)
+        SentrySDKInternal.setCurrentHub(hub)
+
         let sut = try fixture.getSut()
         defer {
             sut.uninstall()
         }
-        
-        let scope = Scope()
-        let hub = SentryHubInternal(client: TestClient(options: Options()), andScope: scope)
-        SentrySDKInternal.setCurrentHub(hub)
         // Make sure there are no other breadcrumbs in the scope
         scope.clearBreadcrumbs()
         
@@ -87,5 +98,86 @@ class SentryBreadcrumbTrackingIntegrationTests: XCTestCase {
         XCTAssertEqual(1, breadcrumbs.count)
         XCTAssertEqual(crumb.category, try XCTUnwrap(breadcrumbs[0]["category"] as? String))
         XCTAssertEqual(crumb.type, try XCTUnwrap(breadcrumbs[0]["type"] as? String))
+    }
+
+    func testAdd_whenOwnerClosedDuringEnteredCallback_shouldNotMutateReplacementScope() throws {
+        let ownerClient = try XCTUnwrap(TestClient(options: fixture.defaultOptions))
+        let owner = EnteredBreadcrumbHub(client: ownerClient, andScope: Scope())
+        SentrySDKInternal.setCurrentHub(owner)
+        let sut = try fixture.getSut()
+        defer { sut.uninstall() }
+        owner.scope.clearBreadcrumbs()
+        let replacement = SentryHubInternal(client: TestClient(options: fixture.defaultOptions), andScope: Scope())
+        var entered = false
+        owner.onClientRead = {
+            entered = true
+            owner.close()
+            owner.bindClient(nil)
+            SentrySDKInternal.setCurrentHub(replacement)
+        }
+
+        sut.add(TestData.crumb)
+
+        XCTAssertTrue(entered, "The A automatic breadcrumb callback must enter before the lifetime handoff")
+        XCTAssertEqual(replacement.scope.breadcrumbs().count, 0, "Entered A automatic breadcrumb must never mutate B scope")
+        XCTAssertEqual(owner.scope.breadcrumbs().count, 0)
+        let fresh = try fixture.getSut()
+        defer { fresh.uninstall() }
+        replacement.scope.clearBreadcrumbs()
+        fresh.add(TestData.crumb)
+        XCTAssertEqual(replacement.scope.breadcrumbs().count, 1, "Fresh B automatic breadcrumbs must remain enabled")
+    }
+
+    func testAdd_whenOwnerEligibleAndGlobalHubChanges_shouldUseOwnerScope() throws {
+        let owner = SentryHubInternal(client: TestClient(options: fixture.defaultOptions), andScope: Scope())
+        SentrySDKInternal.setCurrentHub(owner)
+        let sut = try fixture.getSut()
+        defer { sut.uninstall() }
+        owner.scope.clearBreadcrumbs()
+        let replacement = SentryHubInternal(client: TestClient(options: fixture.defaultOptions), andScope: Scope())
+        SentrySDKInternal.setCurrentHub(replacement)
+
+        sut.add(TestData.crumb)
+
+        XCTAssertEqual(owner.scope.breadcrumbs().count, 1, "An eligible A producer must mutate A scope")
+        XCTAssertEqual(replacement.scope.breadcrumbs().count, 0, "A producer must not resolve the global B hub")
+    }
+
+    func testAdd_whenOwnerClientClosedButStillBound_shouldDrop() throws {
+        let owner = EnteredBreadcrumbHub(client: TestClient(options: fixture.defaultOptions), andScope: Scope())
+        SentrySDKInternal.setCurrentHub(owner)
+        let sut = try fixture.getSut()
+        defer { sut.uninstall() }
+        owner.scope.clearBreadcrumbs()
+        let replacement = SentryHubInternal(client: TestClient(options: fixture.defaultOptions), andScope: Scope())
+        owner.onClientRead = {
+            owner.close()
+            SentrySDKInternal.setCurrentHub(replacement)
+        }
+
+        sut.add(TestData.crumb)
+
+        XCTAssertEqual(owner.scope.breadcrumbs().count, 0, "A closed client must not admit another automatic breadcrumb")
+        XCTAssertEqual(replacement.scope.breadcrumbs().count, 0, "A closed producer must not fall back to B")
+    }
+
+    func testAdd_whenOwnerReleased_shouldDropWithoutRetainingOrResolvingGlobalHub() throws {
+        var sut: SentryAutoBreadcrumbTrackingIntegration<SentryDependencyContainer>?
+        weak var weakOwner: SentryHubInternal?
+        try autoreleasepool {
+            let owner = SentryHubInternal(client: TestClient(options: fixture.defaultOptions), andScope: Scope())
+            weakOwner = owner
+            SentrySDKInternal.setCurrentHub(owner)
+            sut = try fixture.getSut()
+        }
+        let replacement = SentryHubInternal(client: TestClient(options: fixture.defaultOptions), andScope: Scope())
+        SentrySDKInternal.setCurrentHub(replacement)
+        let integration = try XCTUnwrap(sut)
+        defer { integration.uninstall() }
+
+        XCTAssertNil(weakOwner, "The producer must not retain its originating hub")
+        integration.add(TestData.crumb)
+
+        XCTAssertEqual(replacement.scope.breadcrumbs().count, 0, "An ownerless producer must never fall back to B")
     }
 }

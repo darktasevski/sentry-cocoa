@@ -97,6 +97,21 @@ final class SentrySpotlightTransportTests: XCTestCase {
         try compareEnvelopes(request.httpBody, expectedData, message: "Envelopes should be equal")
     }
 
+    func testClose_whenLateSendArrives_shouldSealRealRequestManager() throws {
+        let session = CloseSealRecordingSession()
+        defer { session.invalidateAndCancel() }
+        let manager = SentryQueueableRequestManager(session: session)
+        let sut = SentrySpotlightTransport(options: options, requestManager: manager, requestBuilder: requestBuilder)
+        guard closeForSealTest(sut) else { return }
+        session.markCloseReturned()
+
+        sut.send(envelope: try givenEventEnvelope())
+
+        XCTAssertEqual(session.recordedTasks.count, 0)
+        XCTAssertEqual(session.recordedTasksCreatedAfterClose.count, 0)
+        XCTAssertEqual(session.invalidationCalls.count, 0)
+    }
+
     func testShouldSendTransactionEnvelope() throws {
         // -- Arrange --
         let transactionEnvelope = try givenTransactionEnvelope()
@@ -284,6 +299,8 @@ private class SyncTestRequestManager: NSObject, RequestManager {
     var isReady: Bool
 
     var requests = Invocations<URLRequest>()
+
+    @objc func close() { }
 
     required init(session: URLSession) {
         self.isReady = true

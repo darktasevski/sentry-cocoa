@@ -1258,6 +1258,7 @@ final class SentryClientTests: XCTestCase {
     
 #if os(iOS)
     func testCaptureEvent_DeviceProperties() throws {
+        fixture.processWrapper.overrides.thermalState = .critical
         fixture.getSut().capture(event: TestData.event)
 
         let actual = try lastSentEvent()
@@ -1272,7 +1273,7 @@ final class SentryClientTests: XCTestCase {
         XCTAssertEqual(batteryLevel, 60)
 
         let thermalState = try XCTUnwrap(deviceContext["thermal_state"] as? String)
-        XCTAssertEqual(thermalState, "nominal")
+        XCTAssertEqual(thermalState, "critical")
     }
 
     func testCaptureEvent_DeviceProperties_OtherValues() throws {
@@ -2983,6 +2984,75 @@ final class SentryClientTests: XCTestCase {
         sut.flush(timeout: 1.0)
         
         XCTAssertEqual(testProcessor.forwardTelemetryDataInvocations.count, 1)
+    }
+
+    func testClose_whenCaptureFollowsClose_shouldRejectBeforeTransportAdmission() {
+        // -- Arrange --
+        let sut = fixture.getSut { options in
+            options.shutdownTimeInterval = 0
+            options.enableLogs = false
+        }
+        let beforeCloseId = sut.capture(event: Event())
+        beforeCloseId.assertIsNotEmpty()
+        XCTAssertEqual(fixture.transportAdapter.sendEventWithTraceStateInvocations.count, 1)
+
+        // -- Act --
+        sut.close()
+        let afterCloseId = sut.capture(event: Event())
+
+        // -- Assert --
+        afterCloseId.assertIsEmpty()
+        XCTAssertEqual(fixture.transportAdapter.sendEventWithTraceStateInvocations.count, 1,
+            "Closed clients must reject captures before transport admission")
+    }
+
+    func testClose_whenTimeoutIsZero_shouldFlushThenSealRealSharedRequestManager() throws {
+        let session = CloseSealRecordingSession()
+        defer { session.invalidateAndCancel() }
+        let options = Options()
+        options.dsn = Self.dsn
+        options.urlSession = session
+        options.enableSpotlight = true
+        options.shutdownTimeInterval = 0
+        options.removeAllIntegrations()
+        let sut = SentryClientInternal(options: options, fileManager: fixture.fileManager)
+        let adapter = try XCTUnwrap(Dynamic(sut).transportAdapter.asObject as? SentryTransportAdapter)
+        let transports = try XCTUnwrap(adapter.value(forKey: "transports") as? [Transport])
+        XCTAssertEqual(transports.count, 2)
+        let http = try XCTUnwrap(transports.first { $0 is SentryHttpTransport })
+        let manager = try XCTUnwrap(Dynamic(http).requestManager.asObject as? SentryQueueableRequestManager)
+        let queue = try XCTUnwrap(manager.value(forKey: "queue") as? OperationQueue)
+        queue.isSuspended = true
+        let request = URLRequest(url: URL(string: "https://close-seal.invalid/envelope")!)
+        (manager as RequestManager).add(request, completionHandler: nil)
+        XCTAssertEqual(session.recordedTasks.count, 1, "The real factory-created manager must admit requests before close")
+        let flushAdmissions = Invocations<Void>()
+        http.setStartFlushCallback {
+            let countBeforeFlushAdmission = session.recordedTasks.count
+            (manager as RequestManager).add(request, completionHandler: nil)
+            XCTAssertEqual(session.recordedTasks.count, countBeforeFlushAdmission + 1,
+                "Transport flush must run before close seals request admission")
+            flushAdmissions.record(())
+        }
+        defer { http.setStartFlushCallback({ }) }
+        let testProcessor = TestTelemetryProcessorForClient()
+        Dynamic(sut).telemetryProcessor = testProcessor
+
+        sut.close()
+        session.markCloseReturned()
+        let admittedCount = session.recordedTasks.count
+        (manager as RequestManager).add(request, completionHandler: nil)
+        let envelope = SentryEnvelope(id: nil, singleItem: SentryEnvelopeItem(event: TestData.event))
+        transports.first { $0 is SentrySpotlightTransport }?.send(envelope: envelope)
+
+        XCTAssertEqual(testProcessor.forwardTelemetryDataInvocations.count, 1, "Zero timeout must still flush telemetry")
+        XCTAssertEqual(flushAdmissions.count, 1, "Zero timeout must still invoke the real transport flush")
+        XCTAssertEqual(session.recordedTasks.count, admittedCount, "Client close must seal its real shared request manager before returning")
+        XCTAssertEqual(session.recordedTasksCreatedAfterClose.count, 0)
+        XCTAssertTrue(session.recordedTasks.invocations.allSatisfy { $0.state == .canceling || $0.state == .completed })
+        XCTAssertEqual(session.invalidationCalls.count, 0)
+        queue.cancelAllOperations()
+        queue.isSuspended = false
     }
 
     func testCaptureLog_withLogsDisabled_logDropped() {

@@ -22,6 +22,7 @@ final class SentryWatchdogTerminationTracker: NSObject {
     private let dispatchQueue: SentryDispatchQueueWrapper
     private let fileManager: SentryFileManager
     private let scopePersistentStore: SentryScopePersistentStore
+    private weak var hub: SentryHubInternal?
 
     @objc public init(options: Options,
                       watchdogTerminationLogic: SentryWatchdogTerminationLogic,
@@ -35,6 +36,7 @@ final class SentryWatchdogTerminationTracker: NSObject {
         self.dispatchQueue = dispatchQueueWrapper
         self.fileManager = fileManager
         self.scopePersistentStore = scopePersistentStore
+        self.hub = SentrySDKInternal.currentHub()
     }
 
     @objc public func start() {
@@ -80,7 +82,8 @@ final class SentryWatchdogTerminationTracker: NSObject {
         // We don't need to update the releaseName of the event to the previous app state as we
         // assume it's not a watchdog termination when the releaseName changed between app
         // starts.
-        SentrySDKInternal.captureFatalEvent(event)
+        guard let hub, let client = hub.getClient(), client.isEnabled else { return }
+        hub.captureFatalEvent(event)
     }
 
     private func addBreadcrumbs(to event: Event) {

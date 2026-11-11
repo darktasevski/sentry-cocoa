@@ -7,7 +7,7 @@
 #import "SentryDefines.h"
 #import "SentryEvent.h"
 #import "SentryException.h"
-#import "SentryHub.h"
+#import "SentryHub+Private.h"
 #import "SentryLogC.h"
 #import "SentrySDK+Private.h"
 #import "SentrySDKInternal.h"
@@ -23,6 +23,7 @@ static const NSTimeInterval SENTRY_APP_START_CRASH_FLUSH_DURATION = 5.0;
 @property (nonatomic, strong) SentryInAppLogic *inAppLogic;
 @property (nonatomic, strong) id<SentryCrashReporter> crashWrapper;
 @property (nonatomic, strong) SentryDispatchQueueWrapper *dispatchQueue;
+@property (nonatomic, weak) SentryHubInternal *hub;
 
 @end
 
@@ -36,6 +37,7 @@ static const NSTimeInterval SENTRY_APP_START_CRASH_FLUSH_DURATION = 5.0;
         self.inAppLogic = inAppLogic;
         self.crashWrapper = crashWrapper;
         self.dispatchQueue = dispatchQueue;
+        self.hub = SentrySDKInternal.currentHub;
     }
     return self;
 }
@@ -53,7 +55,10 @@ static const NSTimeInterval SENTRY_APP_START_CRASH_FLUSH_DURATION = 5.0;
 
         [self sendReports:reports onCompletion:onCompletion];
 
-        [SentrySDKInternal flush:SENTRY_APP_START_CRASH_FLUSH_DURATION];
+        SentryHubInternal *hub = self.hub;
+        if ([hub getClient].isEnabled) {
+            [hub flush:SENTRY_APP_START_CRASH_FLUSH_DURATION];
+        }
         SENTRY_LOG_DEBUG(@"Startup crash: Finished flushing.");
 
     } else {
@@ -65,20 +70,13 @@ static const NSTimeInterval SENTRY_APP_START_CRASH_FLUSH_DURATION = 5.0;
 - (void)sendReports:(NSArray *)reports onCompletion:(SentryCrashReportFilterCompletion)onCompletion
 {
     NSMutableArray *sentReports = [[NSMutableArray alloc] init];
+    SentryHubInternal *hub = self.hub;
     for (NSDictionary *report in reports) {
         SentryCrashReportConverter *reportConverter =
             [[SentryCrashReportConverter alloc] initWithReport:report inAppLogic:self.inAppLogic];
-        if (nil != [SentrySDKInternal.currentHub getClient]) {
-            SentryEvent *event = [reportConverter convertReportToEvent];
-            if (nil != event) {
-                [self handleConvertedEvent:event report:report sentReports:sentReports];
-            }
-        } else {
-            SENTRY_LOG_ERROR(
-                @"Crash reports were found but no [SentrySDK.currentHub getClient] is set. "
-                @"Cannot send crash reports to Sentry. This is probably a misconfiguration, "
-                @"make sure you set the client with [SentrySDK.currentHub bindClient] before "
-                @"calling startCrashHandlerWithError:.");
+        SentryEvent *event = [reportConverter convertReportToEvent];
+        if (nil != event) {
+            [self handleConvertedEvent:event report:report sentReports:sentReports hub:hub];
         }
     }
     if (onCompletion) {
@@ -89,9 +87,15 @@ static const NSTimeInterval SENTRY_APP_START_CRASH_FLUSH_DURATION = 5.0;
 - (void)handleConvertedEvent:(SentryEvent *)event
                       report:(NSDictionary *)report
                  sentReports:(NSMutableArray *)sentReports
+                         hub:(SentryHubInternal *)hub
 {
+    if (![hub getClient].isEnabled) {
+        SENTRY_LOG_ERROR(@"Crash reports were found but the originating hub has no enabled client. "
+                         @"Cannot send crash reports to Sentry.");
+        return;
+    }
     [sentReports addObject:report];
-    SentryScope *scope = [[SentryScope alloc] initWithScope:SentrySDKInternal.currentHub.scope];
+    SentryScope *scope = [[SentryScope alloc] initWithScope:hub.scope];
 
     if (report[SENTRYCRASH_REPORT_ATTACHMENTS_ITEM]) {
         for (NSString *ssPath in report[SENTRYCRASH_REPORT_ATTACHMENTS_ITEM]) {
@@ -99,7 +103,7 @@ static const NSTimeInterval SENTRY_APP_START_CRASH_FLUSH_DURATION = 5.0;
         }
     }
 
-    [SentrySDKInternal captureFatalEvent:event withScope:scope];
+    [hub captureFatalEvent:event withScope:scope];
 }
 
 @end

@@ -1,3 +1,4 @@
+#import "Networking/CloseSealURLSessionStub.h"
 #import "SentryDefines.h"
 #import "SentryGeo+Private.h"
 

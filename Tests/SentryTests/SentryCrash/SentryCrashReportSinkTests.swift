@@ -3,6 +3,17 @@
 import XCTest
 
 class SentryCrashReportSinkTests: SentrySDKIntegrationTestsBase {
+
+    private final class EnteredCrashReporter: TestSentryCrashReporter {
+        var onDurationRead: (() -> Void)?
+
+        override var durationFromCrashStateInitToLastCrash: TimeInterval {
+            let callback = onDurationRead
+            onDurationRead = nil
+            callback?()
+            return super.durationFromCrashStateInitToLastCrash
+        }
+    }
     
     private class Fixture {
         let crashWrapper = TestSentryCrashWrapper(processInfoWrapper: ProcessInfo.processInfo)
@@ -30,6 +41,63 @@ class SentryCrashReportSinkTests: SentrySDKIntegrationTestsBase {
     func testFilterReports_withScreenShots() {
         filterReportWithAttachment()
         XCTAssertEqual(1, fixture.dispatchQueue.dispatchAsyncCalled)
+    }
+
+    func testFilterReports_whenOwnerClosedDuringEnteredReplay_shouldNotCaptureInReplacement() throws {
+        try assertReplayOwnership(startup: false, closeOwner: true)
+    }
+
+    func testFilterReports_whenOwnerEligibleAndGlobalHubChanges_shouldCaptureOnOwner() throws {
+        try assertReplayOwnership(startup: false, closeOwner: false)
+    }
+
+    func testFilterReports_whenOwnerClientClosedButStillBound_shouldDrop() throws {
+        try assertReplayOwnership(startup: false, closeOwner: true, unbindOwner: false)
+    }
+
+    func testStartupReplay_whenOwnerClosedDuringEnteredCallback_shouldNotCaptureOrFlushReplacement() throws {
+        try assertReplayOwnership(startup: true, closeOwner: true)
+    }
+
+    func testStartupReplay_whenOwnerEligibleAndGlobalHubChanges_shouldCaptureAndFlushOwner() throws {
+        try assertReplayOwnership(startup: true, closeOwner: false)
+    }
+
+    private func assertReplayOwnership(startup: Bool, closeOwner: Bool, unbindOwner: Bool = true) throws {
+        let owner = SentrySDKInternal.currentHub()
+        let ownerClient = try XCTUnwrap(owner.getClient() as? TestClient)
+        owner.scope.setTag(value: "owner", key: "lifetime")
+        let replacementClient = try XCTUnwrap(TestClient(options: options))
+        let replacement = SentryHubInternal(client: replacementClient, andScope: Scope())
+        replacement.scope.setTag(value: "replacement", key: "lifetime")
+        let reporter = EnteredCrashReporter()
+        reporter.internalDurationFromCrashStateInitToLastCrash = startup ? 1 : 0
+        let sink = SentryCrashReportSink(inAppLogic: SentryInAppLogic(inAppIncludes: []), crashWrapper: reporter, dispatchQueue: fixture.dispatchQueue)
+        var entered = false
+        reporter.onDurationRead = {
+            entered = true
+            if closeOwner {
+                owner.close()
+                if unbindOwner { owner.bindClient(nil) }
+            }
+            SentrySDKInternal.setCurrentHub(replacement)
+        }
+
+        sink.filterReports([[:]]) { _, _, _ in }
+
+        XCTAssertTrue(entered, "The A replay callback must enter before the lifetime handoff")
+        XCTAssertEqual(replacementClient.captureFatalEventInvocations.count, 0, "Entered A replay must never capture through B")
+        XCTAssertEqual(replacementClient.flushInvocations.count, 0, "Startup replay must never flush B")
+        XCTAssertEqual(ownerClient.captureFatalEventInvocations.count, closeOwner ? 0 : 1)
+        if !closeOwner {
+            XCTAssertEqual(ownerClient.captureFatalEventInvocations.first?.scope.tags["lifetime"], "owner")
+            XCTAssertEqual(ownerClient.flushInvocations.count, startup ? 1 : 0)
+        }
+
+        let freshSink = fixture.sut
+        freshSink.filterReports([[:]]) { _, _, _ in }
+        XCTAssertEqual(replacementClient.captureFatalEventInvocations.count, 1, "Fresh B crash replay must remain enabled")
+        XCTAssertEqual(replacementClient.captureFatalEventInvocations.first?.scope.tags["lifetime"], "replacement")
     }
     
     func testFilterReports_CopyHubScope() {

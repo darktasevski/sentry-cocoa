@@ -37,12 +37,21 @@ jobs:
     name: Check API Stability
     if: needs.files-changed.outputs.run_api_stability_for_prs == 'true'
     needs: files-changed
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+
+      - name: Select API Toolchain
+        uses: ./.github/actions/setup-xcode
+        with:
+          version: "26.6"
+          resolve-simulators: "false"
+
+      - name: Test Mixed API Extraction
+        run: ./scripts/tests/test-extract-swift-api.sh --work-dir "$RUNNER_TEMP/api-extractor-regression"
 
       - name: Generate HEAD SDK
         run: |
