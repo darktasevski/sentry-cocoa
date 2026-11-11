@@ -69,6 +69,7 @@ NS_ASSUME_NONNULL_BEGIN
  */
 @property (nonatomic) BOOL enableUIViewControllerInitSwizzling;
 
+#if (TARGET_OS_IOS || TARGET_OS_TV || TARGET_OS_VISION) && SENTRY_OBJC_HAS_UIKIT
 /**
  * Tracks slow and frozen frames, frames delay, and time to display without waking up the app for
  * every frame.
@@ -90,6 +91,7 @@ NS_ASSUME_NONNULL_BEGIN
  * @warning This is an experimental feature and is therefore disabled by default.
  */
 @property (nonatomic) BOOL enableUIUpdateLinkFramesTracking;
+#endif // (TARGET_OS_IOS || TARGET_OS_TV || TARGET_OS_VISION) && SENTRY_OBJC_HAS_UIKIT
 
 /// Initializes experimental options with default values.
 - (instancetype)init;

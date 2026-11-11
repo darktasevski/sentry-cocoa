@@ -64,6 +64,7 @@ public final class SentryExperimentalOptions: NSObject {
      */
     public var enableUIViewControllerInitSwizzling = false
 
+    #if (os(iOS) || os(tvOS) || os(visionOS)) && !SENTRY_NO_UI_FRAMEWORK
     /// Tracks slow and frozen frames, frames delay, and time to display without waking up the app
     /// for every frame.
     ///
@@ -84,4 +85,5 @@ public final class SentryExperimentalOptions: NSObject {
     ///
     /// - Experiment: Disabled by default while this implementation is being tested.
     public var enableUIUpdateLinkFramesTracking = false
+    #endif // (os(iOS) || os(tvOS) || os(visionOS)) && !SENTRY_NO_UI_FRAMEWORK
 }

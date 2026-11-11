@@ -149,7 +149,8 @@
 }
 #endif
 
-#pragma mark - enableUIUpdateLinkFramesTracking
+#if (TARGET_OS_IOS || TARGET_OS_TV || TARGET_OS_VISION) && SENTRY_OBJC_HAS_UIKIT
+#    pragma mark - enableUIUpdateLinkFramesTracking
 
 - (void)testEnableUIUpdateLinkFramesTracking_whenDefault_shouldBeFalse
 {
@@ -177,5 +178,6 @@
     // -- Assert --
     XCTAssertFalse(options.enableUIUpdateLinkFramesTracking);
 }
+#endif // (TARGET_OS_IOS || TARGET_OS_TV || TARGET_OS_VISION) && SENTRY_OBJC_HAS_UIKIT
 
 @end
