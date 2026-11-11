@@ -73,9 +73,10 @@ public final class SentryExperimentalOptions: NSObject {
     /// thread is blocked, and uses a `UIUpdateLink` to observe the UI updates UIKit produces anyway.
     /// An idle app stays idle.
     ///
-    /// The frame data can differ slightly from the default implementation: the total frame count
-    /// is calculated from the time that passed, and a frame counts as slow or frozen when one piece
-    /// of work blocks the main thread for longer than the duration of a frame.
+    /// The frame data differs from the default implementation: the total frame count only includes
+    /// the frames UIKit produces, so it doesn't grow while nothing on screen changes, and a frame
+    /// counts as slow or frozen when one piece of work blocks the main thread for longer than the
+    /// duration of a frame.
     ///
     /// Only has an effect on iOS 18, tvOS 18, and visionOS 2 and later. On older versions and on
     /// Mac Catalyst the SDK keeps using a `CADisplayLink`. Configure this option before starting

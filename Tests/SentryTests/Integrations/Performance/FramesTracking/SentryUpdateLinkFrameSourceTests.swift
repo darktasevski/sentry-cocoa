@@ -288,89 +288,103 @@ final class SentryUpdateLinkFrameSourceTests: XCTestCase {
 
     // MARK: - Total frames
 
-    func testCurrentFrames_whenTimePasses_shouldExtrapolateTotalFrames() {
+    func testCurrentFrames_whenUIUpdatesReported_shouldCountEachAsOneFrame() {
         // -- Arrange --
         let sut = fixture.sut
         sut.start()
 
         // -- Act --
-        fixture.wait(for: 1)
+        fixture.uiUpdateObserver.update()
+        fixture.uiUpdateObserver.update()
+        fixture.uiUpdateObserver.update()
 
         // -- Assert --
-        XCTAssertEqual(sut.currentFrames().total, 60)
+        XCTAssertEqual(sut.currentFrames().total, 3)
     }
 
-    func testCurrentFrames_whenFrameIsDelayed_shouldCountItAsOneFrame() {
+    func testCurrentFrames_whenTimePassesWithoutUIUpdates_shouldNotCountFrames() {
         // -- Arrange --
         let sut = fixture.sut
         sut.start()
 
         // -- Act --
+        // Nothing on screen changes, so UIKit produces no frames.
         fixture.wait(for: 1)
-        fixture.work(for: 2)
-        fixture.wait(for: 1)
-
-        // -- Assert --
-        XCTAssertEqual(sut.currentFrames().total, 121)
-    }
-
-    func testCurrentFrames_whenFrameRateChanges_shouldCountFramesWithFrameRateOfTheirTime() {
-        // -- Arrange --
-        let sut = fixture.sut
-        sut.start()
-
-        // -- Act --
-        fixture.wait(for: 1)
-        fixture.uiUpdateObserver.update(frameRate: 120)
+        fixture.work(for: 0.001)
         fixture.wait(for: 1)
 
         // -- Assert --
-        XCTAssertEqual(sut.currentFrames().total, 180)
+        XCTAssertEqual(sut.currentFrames().total, 0)
     }
 
     func testCurrentFrames_whenReadWhileMainThreadIsBlocked_shouldNotCountFramesOfBlockedTime() {
         // -- Arrange --
         let sut = fixture.sut
         sut.start()
-        fixture.wait(for: 1)
+        fixture.uiUpdateObserver.update()
+        fixture.runLoopObserver.observe(.afterWaiting)
 
         // -- Act --
         // A span that starts or finishes on another thread reads the frames while the main thread
         // is blocked.
-        fixture.dateProvider.advance(by: 1.9)
+        fixture.dateProvider.advance(by: 2)
         let totalWhileBlocked = sut.currentFrames().total
-        fixture.dateProvider.advance(by: 0.1)
-        fixture.runLoopObserver.observe(.beforeWaiting)
-        let totalAfterBlock = sut.currentFrames().total
 
         // -- Assert --
-        XCTAssertEqual(totalWhileBlocked, 61)
-        XCTAssertEqual(totalAfterBlock, 61)
+        XCTAssertEqual(totalWhileBlocked, 1)
     }
 
-    func testCurrentFrames_whenMainThreadIsBlocked_shouldNeverDecrease() {
+    func testCurrentFrames_whenUIUpdateReportedDuringDelayedFrame_shouldCountItAsOneFrame() {
         // -- Arrange --
         let sut = fixture.sut
         sut.start()
-        fixture.wait(for: 0.5)
-        var totals: [UInt] = []
+        fixture.runLoopObserver.observe(.afterWaiting)
 
         // -- Act --
-        for _ in 0..<40 {
-            fixture.dateProvider.advance(by: 0.005)
-            totals.append(sut.currentFrames().total)
-        }
+        // UIKit reports the UI update from within the work that blocks the main thread.
+        fixture.dateProvider.advance(by: 2)
+        fixture.uiUpdateObserver.update()
         fixture.runLoopObserver.observe(.beforeWaiting)
-        totals.append(sut.currentFrames().total)
-        fixture.wait(for: 0.1)
-        totals.append(sut.currentFrames().total)
 
         // -- Assert --
-        XCTAssertEqual(totals, totals.sorted())
-        XCTAssertEqual(totals.last, 37)
+        let frames = sut.currentFrames()
+        XCTAssertEqual(frames.total, 1)
+        XCTAssertEqual(frames.frozen, 1)
     }
 
-    func testCurrentFrames_whenFrameRateChangesWhileMainThreadIsBlocked_shouldCountBlockedTimeAsOneFrame() {
+    func testCurrentFrames_whenNoUIUpdateReportedDuringDelayedFrame_shouldCountItAsOneFrame() {
+        // -- Arrange --
+        let sut = fixture.sut
+        sut.start()
+
+        // -- Act --
+        // The work that blocks the main thread changes nothing on screen.
+        fixture.work(for: 2)
+
+        // -- Assert --
+        let frames = sut.currentFrames()
+        XCTAssertEqual(frames.total, 1)
+        XCTAssertEqual(frames.frozen, 1)
+    }
+
+    func testCurrentFrames_whenUIUpdateReportedBeforeDelayedFrame_shouldCountBoth() {
+        // -- Arrange --
+        let sut = fixture.sut
+        sut.start()
+
+        // -- Act --
+        fixture.runLoopObserver.observe(.afterWaiting)
+        fixture.uiUpdateObserver.update()
+        fixture.runLoopObserver.observe(.beforeWaiting)
+        fixture.work(for: fixture.slowFrameThreshold + 0.001)
+
+        // -- Assert --
+        let frames = sut.currentFrames()
+        XCTAssertEqual(frames.total, 2)
+        XCTAssertEqual(frames.slow, 1)
+    }
+
+    func testCurrentFrames_whenFrameRateChangesWhileMainThreadIsBlocked_shouldCountOneFrame() {
         // -- Arrange --
         let sut = fixture.sut
         sut.start()
@@ -389,34 +403,61 @@ final class SentryUpdateLinkFrameSourceTests: XCTestCase {
         XCTAssertEqual(sut.currentFrames().frozen, 1)
     }
 
-    func testCurrentFrames_whenStoppedWhileMainThreadIsBlocked_shouldCountBlockedTimeAsOneFrame() {
+    func testCurrentFrames_whenSlowAndFrozenFramesWithAndWithoutUIUpdates_shouldNeverExceedTotal() {
         // -- Arrange --
         let sut = fixture.sut
         sut.start()
-        fixture.wait(for: 1)
 
         // -- Act --
-        fixture.dateProvider.advance(by: 2)
-        fixture.notificationCenter.post(Notification(name: UIApplication.willResignActiveNotification))
+        for index in 0..<20 {
+            fixture.runLoopObserver.observe(.afterWaiting)
+            fixture.dateProvider.advance(by: index.isMultiple(of: 3) ? 0.8 : 0.05)
+            if index.isMultiple(of: 2) {
+                fixture.uiUpdateObserver.update()
+            }
+            fixture.runLoopObserver.observe(.beforeWaiting)
+        }
 
         // -- Assert --
-        XCTAssertEqual(sut.currentFrames().total, 61)
+        let frames = sut.currentFrames()
+        XCTAssertEqual(frames.slow + frames.frozen, 20)
+        XCTAssertGreaterThanOrEqual(frames.total, frames.slow + frames.frozen)
+        XCTAssertEqual(frames.total, 20)
     }
 
     func testCurrentFrames_whenNotActive_shouldNotCountFrames() {
         // -- Arrange --
         let sut = fixture.sut
         sut.start()
-        fixture.dateProvider.advance(by: 1)
+        fixture.uiUpdateObserver.update()
 
         // -- Act --
         fixture.notificationCenter.post(Notification(name: UIApplication.willResignActiveNotification))
-        fixture.dateProvider.advance(by: 10)
+        fixture.uiUpdateObserver.update()
+        fixture.work(for: 2)
         fixture.notificationCenter.post(Notification(name: UIApplication.didBecomeActiveNotification))
-        fixture.dateProvider.advance(by: 1)
+        fixture.uiUpdateObserver.update()
 
         // -- Assert --
-        XCTAssertEqual(sut.currentFrames().total, 120)
+        XCTAssertEqual(sut.currentFrames().total, 2)
+    }
+
+    func testCurrentFrames_whenStoppedWhileMainThreadIsBlocked_shouldNotReportDelayedFrameAfterRestart() {
+        // -- Arrange --
+        let sut = fixture.sut
+        sut.start()
+        fixture.runLoopObserver.observe(.afterWaiting)
+
+        // -- Act --
+        fixture.dateProvider.advance(by: 2)
+        fixture.notificationCenter.post(Notification(name: UIApplication.willResignActiveNotification))
+        fixture.notificationCenter.post(Notification(name: UIApplication.didBecomeActiveNotification))
+        fixture.runLoopObserver.observe(.beforeWaiting)
+
+        // -- Assert --
+        let frames = sut.currentFrames()
+        XCTAssertEqual(frames.total, 0)
+        XCTAssertEqual(frames.frozen, 0)
     }
 
     func testResetFrames_whenRunning_shouldStartCountingFromZero() {
@@ -424,15 +465,15 @@ final class SentryUpdateLinkFrameSourceTests: XCTestCase {
         let sut = fixture.sut
         sut.start()
         fixture.work(for: 1)
-        fixture.wait(for: 1)
+        fixture.uiUpdateObserver.update()
 
         // -- Act --
         sut.resetFrames()
-        fixture.wait(for: 0.5)
+        fixture.uiUpdateObserver.update()
 
         // -- Assert --
         let frames = sut.currentFrames()
-        XCTAssertEqual(frames.total, 30)
+        XCTAssertEqual(frames.total, 1)
         XCTAssertEqual(frames.frozen, 0)
     }
 

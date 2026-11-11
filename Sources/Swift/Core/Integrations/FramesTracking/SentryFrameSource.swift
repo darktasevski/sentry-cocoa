@@ -17,7 +17,8 @@ protocol SentryFrameSource: AnyObject {
     func start(delegate: SentryFrameSourceDelegate)
     func stop()
 
-    /// The number of frames the display showed while the source was started. A delayed frame counts
+    /// The number of frames the source observed while it was started. A display link observes every
+    /// frame of the display, a `UIUpdateLink` only the frames UIKit produces. A delayed frame counts
     /// as one frame, no matter how long it took. Can be called on any thread.
     func totalFrames() -> UInt
 
