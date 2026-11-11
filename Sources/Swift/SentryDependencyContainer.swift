@@ -346,11 +346,14 @@ extension SentryFileManager: SentryFileManagerProtocol { }
     }
 
     func makeFrameSource() -> SentryFrameSource {
+        makeFrameSource(options: startOptions)
+    }
+
+    func makeFrameSource(options: Options?) -> SentryFrameSource {
         // UIUpdateLink lets the tracker observe frames without waking up the app for every frame.
-        // It isn't available on Mac Catalyst. The tracker keeps its frame source until the SDK
-        // closes, so the option only has an effect when it's set before the SDK starts.
+        // It isn't available on Mac Catalyst.
         #if !targetEnvironment(macCatalyst)
-        if #available(iOS 18.0, tvOS 18.0, visionOS 2.0, *), startOptions?.experimental.enableUIUpdateLinkFramesTracking == true {
+        if #available(iOS 18.0, tvOS 18.0, visionOS 2.0, *), options?.experimental.enableUIUpdateLinkFramesTracking == true {
             let uiUpdateObserver = SentryUIUpdateLinkObserver(notificationCenter: notificationCenterWrapper, dispatchQueueWrapper: dispatchQueueWrapper, applicationProvider: defaultApplicationProvider)
             return SentryUpdateLinkFrameSource(dateProvider: dateProvider, runLoopObserver: SentryMainRunLoopActivityObserver(), uiUpdateObserver: uiUpdateObserver)
         }
@@ -784,6 +787,7 @@ extension SentryDependencyContainer: NSFileManagerSwizzlingProvider { }
 #if (os(iOS) || os(tvOS) || os(visionOS)) && !SENTRY_NO_UI_FRAMEWORK
 protocol FramesTrackingProvider {
     var framesTracker: SentryFramesTracker { get }
+    func makeFrameSource(options: Options?) -> SentryFrameSource
 }
 
 extension SentryDependencyContainer: FramesTrackingProvider { }

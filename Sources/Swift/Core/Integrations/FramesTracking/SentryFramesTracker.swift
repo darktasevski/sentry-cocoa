@@ -132,6 +132,29 @@ public class SentryFramesTracker: NSObject {
             self.stopInternal()
         }
     }
+
+    /// Replaces the frame source when it's of another kind than the current one.
+    ///
+    /// The tracker can be created before the SDK's options are known, for example by a launch
+    /// profile, and then has the default frame source. Once the options are known, the SDK calls
+    /// this with the frame source they ask for. Frames the old source counted are dropped.
+    func useFrameSource(_ frameSource: SentryFrameSource) {
+        dispatchQueueWrapper.dispatchAsyncOnMainQueueIfNotMainThread {
+            self.useFrameSourceInternal(frameSource)
+        }
+    }
+
+    private func useFrameSourceInternal(_ frameSource: SentryFrameSource) {
+        guard ObjectIdentifier(type(of: frameSource)) != ObjectIdentifier(type(of: self.frameSource)) else { return }
+
+        self.frameSource.stop()
+        self.frameSource = frameSource
+        frameSource.requiresContinuousFrames = !listeners.isEmpty
+
+        if isRunning {
+            frameSource.start(delegate: self)
+        }
+    }
     
     private func stopInternal() {
         guard isStarted else { return }
@@ -283,6 +306,10 @@ public class SentryFramesTracker: NSObject {
     func setFrameSource(_ frameSource: SentryFrameSource) {
         self.frameSource.stop()
         self.frameSource = frameSource
+    }
+
+    var frameSourceForTesting: SentryFrameSource {
+        frameSource
     }
 
     var listenersCount: Int {

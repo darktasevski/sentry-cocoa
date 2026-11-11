@@ -40,7 +40,7 @@ final class SentryMainRunLoopActivityObserverTests: XCTestCase {
         // -- Assert --
         // The frames tracker relies on nothing being reported while the run loop waits.
         let beforeWaitingIndex = try XCTUnwrap(activities.firstIndex(of: .beforeWaiting))
-        XCTAssertEqual(activities[beforeWaitingIndex + 1], .afterWaiting)
+        XCTAssertEqual(try XCTUnwrap(activities.element(at: beforeWaitingIndex + 1)), .afterWaiting)
     }
 
     func testStop_whenMainRunLoopRuns_shouldNotReportActivities() {

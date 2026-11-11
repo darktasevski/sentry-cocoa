@@ -77,8 +77,9 @@ final class SentryUpdateLinkFrameSourceTests: XCTestCase {
             dateProvider.advance(by: 1)
         }
 
+        lazy var frameSource = SentryUpdateLinkFrameSource(dateProvider: dateProvider, runLoopObserver: runLoopObserver, uiUpdateObserver: uiUpdateObserver)
         lazy var sut = SentryFramesTracker(
-            frameSource: SentryUpdateLinkFrameSource(dateProvider: dateProvider, runLoopObserver: runLoopObserver, uiUpdateObserver: uiUpdateObserver),
+            frameSource: frameSource,
             dateProvider: dateProvider,
             dispatchQueueWrapper: SentryDispatchQueueWrapper(),
             notificationCenter: notificationCenter,
@@ -174,6 +175,74 @@ final class SentryUpdateLinkFrameSourceTests: XCTestCase {
         XCTAssertGreaterThan(fixture.runLoopObserver.stopInvocations, 0)
         XCTAssertEqual(displayLinkWrapper.linkInvocations.count, 1)
         XCTAssertEqual(sut.currentFrames().total, 1)
+    }
+
+    func testUseFrameSource_whenRunningWithOtherKind_shouldStopOldAndStartNewSource() {
+        // -- Arrange --
+        let sut = fixture.sut
+        sut.start()
+        let displayLinkWrapper = TestDisplayLinkWrapper(dateProvider: fixture.dateProvider)
+        let displayLinkSource = SentryDisplayLinkFrameSource(displayLinkWrapper: displayLinkWrapper, dateProvider: fixture.dateProvider)
+
+        // -- Act --
+        sut.useFrameSource(displayLinkSource)
+        displayLinkWrapper.call()
+        displayLinkWrapper.normalFrame()
+
+        // -- Assert --
+        XCTAssertEqual(fixture.runLoopObserver.stopInvocations, 1)
+        XCTAssertEqual(fixture.uiUpdateObserver.stopInvocations, 1)
+        XCTAssertEqual(displayLinkWrapper.linkInvocations.count, 1)
+        XCTAssertTrue(sut.isRunning)
+        XCTAssertEqual(sut.currentFrames().total, 1)
+    }
+
+    func testUseFrameSource_whenNotRunningWithOtherKind_shouldNotStartNewSource() {
+        // -- Arrange --
+        let sut = fixture.sut
+        let displayLinkWrapper = TestDisplayLinkWrapper(dateProvider: fixture.dateProvider)
+        let displayLinkSource = SentryDisplayLinkFrameSource(displayLinkWrapper: displayLinkWrapper, dateProvider: fixture.dateProvider)
+
+        // -- Act --
+        sut.useFrameSource(displayLinkSource)
+
+        // -- Assert --
+        XCTAssertEqual(displayLinkWrapper.linkInvocations.count, 0)
+        XCTAssertTrue(sut.frameSourceForTesting is SentryDisplayLinkFrameSource)
+    }
+
+    func testUseFrameSource_whenSameKind_shouldKeepCurrentSource() {
+        // -- Arrange --
+        let sut = fixture.sut
+        sut.start()
+        let otherRunLoopObserver = TestMainRunLoopActivityObserver()
+        let otherUIUpdateObserver = TestUIUpdateObserver()
+        let otherSource = SentryUpdateLinkFrameSource(dateProvider: fixture.dateProvider, runLoopObserver: otherRunLoopObserver, uiUpdateObserver: otherUIUpdateObserver)
+
+        // -- Act --
+        sut.useFrameSource(otherSource)
+
+        // -- Assert --
+        XCTAssertEqual(fixture.runLoopObserver.stopInvocations, 0)
+        XCTAssertEqual(otherRunLoopObserver.startInvocations, 0)
+        XCTAssertTrue(sut.frameSourceForTesting === fixture.frameSource)
+    }
+
+    func testUseFrameSource_whenListenerRegistered_shouldRequireContinuousFramesOnNewSource() {
+        // -- Arrange --
+        let sut = fixture.sut
+        sut.start()
+        let listener = TestListener()
+        sut.addListener(listener)
+        let otherUIUpdateObserver = TestUIUpdateObserver()
+        let otherSource = SentryUpdateLinkFrameSource(dateProvider: fixture.dateProvider, runLoopObserver: TestMainRunLoopActivityObserver(), uiUpdateObserver: otherUIUpdateObserver)
+        sut.setFrameSource(SentryDisplayLinkFrameSource(displayLinkWrapper: TestDisplayLinkWrapper(dateProvider: fixture.dateProvider), dateProvider: fixture.dateProvider))
+
+        // -- Act --
+        sut.useFrameSource(otherSource)
+
+        // -- Assert --
+        XCTAssertTrue(otherUIUpdateObserver.requiresContinuousUpdates)
     }
 
     // MARK: - Slow and frozen frames

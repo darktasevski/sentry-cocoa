@@ -1,4 +1,9 @@
 #import <Foundation/Foundation.h>
+#if !__has_include(<SentryObjC/SentryObjCDefines.h>)
+#    import "SentryObjCDefines.h"
+#else
+#    import <SentryObjC/SentryObjCDefines.h>
+#endif
 #if !__has_include(<SentryObjC/SentryObjCMetricKitOptions.h>)
 #    import "SentryObjCMetricKitOptions.h"
 #else
