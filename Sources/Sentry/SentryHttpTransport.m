@@ -8,6 +8,26 @@
 #import "SentrySerialization.h"
 #import "SentrySwift.h"
 
+@interface SentryHttpTransportFlushState : NSObject
+
+@property (nonatomic, strong) dispatch_group_t group;
+@property (nonatomic) BOOL activated;
+@property (nonatomic) BOOL terminal;
+
+@end
+
+@implementation SentryHttpTransportFlushState
+
+- (instancetype)init
+{
+    if (self = [super init]) {
+        _group = dispatch_group_create();
+    }
+    return self;
+}
+
+@end
+
 @interface SentryHttpTransport () <SentryReachabilityObserver>
 
 @property (nonatomic, readonly) NSTimeInterval cachedEnvelopeSendDelay;
@@ -19,13 +39,18 @@
 @property (nonatomic, strong) id<SentryRateLimits> rateLimits;
 @property (nonatomic, strong) SentryEnvelopeRateLimit *envelopeRateLimit;
 @property (nonatomic, strong) SentryDispatchQueueWrapper *dispatchQueue;
-@property (nonatomic, strong) dispatch_group_t dispatchGroup;
+@property (nullable, nonatomic, strong) SentryHttpTransportFlushState *currentFlush;
 @property (nonatomic, strong) id<SentryCurrentDateProvider> dateProvider;
 @property (nonatomic, strong) SentryReachability *reachability;
 
 #if defined(SENTRY_TEST) || defined(SENTRY_TEST_CI) || defined(DEBUG)
 @property (nullable, nonatomic, strong) void (^startFlushCallback)(void);
 #endif // defined(SENTRY_TEST) || defined(SENTRY_TEST_CI) || defined(DEBUG)
+
+#if defined(SENTRY_TEST) || defined(SENTRY_TEST_CI)
+@property (nullable, nonatomic, copy) void (^drainFlushStateCallback)(NSObject *, BOOL, BOOL);
+@property (nullable, nonatomic, copy) void (^drainFlushCleanupCallback)(NSObject *, NSInteger);
+#endif // defined(SENTRY_TEST) || defined(SENTRY_TEST_CI)
 
 /**
  * Relay expects the discarded events split by data category and reason; see
@@ -38,13 +63,8 @@
 
 @property (nonatomic, strong) NSMutableArray<SentryEnvelope *> *notStoredEnvelopes;
 
-/**
- * Synching with a dispatch queue to have concurrent reads and writes as barrier blocks is roughly
- * 30% slower than using atomic here.
- */
-@property (atomic) BOOL isSending;
-
-@property (atomic) BOOL isFlushing;
+// The serial HTTP queue owns cache selection and every active-drain transition.
+@property (nonatomic) BOOL isSending;
 
 @end
 
@@ -73,10 +93,8 @@
         self.envelopeRateLimit = envelopeRateLimit;
         self.dispatchQueue = dispatchQueueWrapper;
         self.dateProvider = dateProvider;
-        self.dispatchGroup = dispatch_group_create();
         self.reachability = reachability;
         _isSending = NO;
-        _isFlushing = NO;
         self.discardedEvents = [[NSMutableDictionary alloc] init];
         self.notStoredEnvelopes = [[NSMutableArray alloc] init];
         [self.envelopeRateLimit setDelegate:self];
@@ -86,7 +104,7 @@
                 [weakSelf envelopeItemDeleted:item withCategory:category];
             }];
 
-        [self sendAllCachedEnvelopes];
+        [self scheduleSendAllCachedEnvelopes];
 
         [self.reachability addObserver:self];
     }
@@ -97,7 +115,7 @@
 {
     if (connected) {
         SENTRY_LOG_DEBUG(@"Internet connection is back.");
-        [self sendAllCachedEnvelopes];
+        [self scheduleSendAllCachedEnvelopes];
     } else {
         SENTRY_LOG_DEBUG(@"Lost internet connection.");
     }
@@ -124,14 +142,18 @@
     // thread, which could be the main thread.
     __weak SentryHttpTransport *weakSelf = self;
     [self.dispatchQueue dispatchAsyncWithBlock:^{
-        NSString *path = [weakSelf.fileManager storeEnvelope:envelopeToStore];
+        SentryHttpTransport *strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+        NSString *path = [strongSelf.fileManager storeEnvelope:envelopeToStore];
         if (path == nil) {
             SENTRY_LOG_DEBUG(@"Could not store envelope. Schedule for sending.");
-            @synchronized(weakSelf.notStoredEnvelopes) {
-                [weakSelf.notStoredEnvelopes addObject:envelopeToStore];
+            @synchronized(strongSelf.notStoredEnvelopes) {
+                [strongSelf.notStoredEnvelopes addObject:envelopeToStore];
             }
         }
-        [weakSelf sendAllCachedEnvelopes];
+        [strongSelf sendAllCachedEnvelopes];
     }];
 }
 
@@ -178,6 +200,22 @@
 }
 #endif // defined(SENTRY_TEST) || defined(SENTRY_TEST_CI) || defined(DEBUG)
 
+#if defined(SENTRY_TEST) || defined(SENTRY_TEST_CI)
+- (void)setDrainFlushStateCallback:(void (^)(NSObject *, BOOL, BOOL))callback
+{
+    @synchronized(self) {
+        _drainFlushStateCallback = [callback copy];
+    }
+}
+
+- (void)setDrainFlushCleanupCallback:(void (^)(NSObject *, NSInteger))callback
+{
+    @synchronized(self) {
+        _drainFlushCleanupCallback = [callback copy];
+    }
+}
+#endif // defined(SENTRY_TEST) || defined(SENTRY_TEST_CI)
+
 - (SentryFlushResult)flush:(NSTimeInterval)timeout
 {
     // Calculate the dispatch time of the flush duration as early as possible to guarantee an exact
@@ -186,16 +224,23 @@
     dispatch_time_t delta = (int64_t)(timeout * (NSTimeInterval)NSEC_PER_SEC);
     dispatch_time_t dispatchTimeout = dispatch_time(DISPATCH_TIME_NOW, delta);
 
+    SentryHttpTransportFlushState *flush;
     @synchronized(self) {
-        if (_isFlushing) {
+        if (self.currentFlush != nil) {
             SENTRY_LOG_DEBUG(@"Already flushing.");
             return SentryFlushResultAlreadyFlushing;
         }
 
         SENTRY_LOG_DEBUG(@"Start flushing.");
 
-        _isFlushing = YES;
-        dispatch_group_enter(self.dispatchGroup);
+        flush = [[SentryHttpTransportFlushState alloc] init];
+        dispatch_group_enter(flush.group);
+        self.currentFlush = flush;
+#if defined(SENTRY_TEST) || defined(SENTRY_TEST_CI)
+        if (self.drainFlushStateCallback != nil) {
+            self.drainFlushStateCallback(flush, flush.activated, flush.terminal);
+        }
+#endif // defined(SENTRY_TEST) || defined(SENTRY_TEST_CI)
 #if defined(SENTRY_TEST) || defined(SENTRY_TEST_CI) || defined(DEBUG)
         if (self.startFlushCallback != nil) {
             self.startFlushCallback();
@@ -203,20 +248,29 @@
 #endif // defined(SENTRY_TEST) || defined(SENTRY_TEST_CI) || defined(DEBUG)
     }
 
-    // We are waiting for the dispatch group below, which we leave in finished sending. As
-    // sendAllCachedEnvelopes does some IO, it could block the calling thread longer than the
-    // desired flush duration. Therefore, we dispatch the sendAllCachedEnvelopes async. Furthermore,
-    // when calling flush directly after captureEnvelope, it could happen that SDK doesn't store the
-    // envelope to disk, which happens async, before starting to flush.
-    [self.dispatchQueue dispatchAsyncWithBlock:^{ [self sendAllCachedEnvelopes]; }];
+    // Activation must follow preceding capture stores before an empty drain can finish this wait.
+    __weak SentryHttpTransport *weakSelf = self;
+    [self.dispatchQueue dispatchAsyncWithBlock:^{
+        SentryHttpTransport *strongSelf = weakSelf;
+        [strongSelf activateFlush:flush];
+        // A timed-out waiter still owns its accepted opportunity to drain cached work.
+        [strongSelf sendAllCachedEnvelopes];
+    }];
 
-    intptr_t result = dispatch_group_wait(self.dispatchGroup, dispatchTimeout);
+    intptr_t result = dispatch_group_wait(flush.group, dispatchTimeout);
 
-    // Every `dispatch_group_enter` must have a corresponding `dispatch_group_leave`.
-    // If nobody called `stopFlushing`, we must call `dispatch_group_leave` here, because
-    // otherwise the dispatch group never leaves and the next time somebody calls flush,
-    // flush will always time out.
-    [self stopFlushing];
+#if defined(SENTRY_TEST) || defined(SENTRY_TEST_CI)
+    void (^cleanupCallback)(NSObject *, NSInteger);
+    @synchronized(self) {
+        cleanupCallback = self.drainFlushCleanupCallback;
+    }
+    if (cleanupCallback != nil) {
+        cleanupCallback(flush, result);
+    }
+#endif // defined(SENTRY_TEST) || defined(SENTRY_TEST_CI)
+
+    // Caller cleanup releases a timed-out registration even when the HTTP queue is stalled.
+    [self completeFlush:flush];
 
     if (result == 0) {
         SENTRY_LOG_DEBUG(@"Finished flushing.");
@@ -227,14 +281,36 @@
     }
 }
 
-- (void)stopFlushing
+- (void)activateFlush:(SentryHttpTransportFlushState *)flush
 {
     @synchronized(self) {
-        if (_isFlushing) {
-            SENTRY_LOG_DEBUG(@"Stop flushing.");
-            _isFlushing = NO;
-            dispatch_group_leave(self.dispatchGroup);
+        if (self.currentFlush != flush || flush.terminal) {
+            return;
         }
+        flush.activated = YES;
+#if defined(SENTRY_TEST) || defined(SENTRY_TEST_CI)
+        if (self.drainFlushStateCallback != nil) {
+            self.drainFlushStateCallback(flush, flush.activated, flush.terminal);
+        }
+#endif // defined(SENTRY_TEST) || defined(SENTRY_TEST_CI)
+    }
+}
+
+- (void)completeFlush:(SentryHttpTransportFlushState *)flush
+{
+    @synchronized(self) {
+        if (self.currentFlush != flush || flush.terminal) {
+            return;
+        }
+        SENTRY_LOG_DEBUG(@"Stop flushing.");
+        flush.terminal = YES;
+        self.currentFlush = nil;
+        dispatch_group_leave(flush.group);
+#if defined(SENTRY_TEST) || defined(SENTRY_TEST_CI)
+        if (self.drainFlushStateCallback != nil) {
+            self.drainFlushStateCallback(flush, flush.activated, flush.terminal);
+        }
+#endif // defined(SENTRY_TEST) || defined(SENTRY_TEST_CI)
     }
 }
 
@@ -298,21 +374,28 @@
     return [[SentryEnvelope alloc] initWithHeader:envelope.header items:currentItems];
 }
 
+- (void)scheduleSendAllCachedEnvelopes
+{
+    __weak SentryHttpTransport *weakSelf = self;
+    [self.dispatchQueue dispatchAsyncWithBlock:^{
+        SentryHttpTransport *strongSelf = weakSelf;
+        [strongSelf sendAllCachedEnvelopes];
+    }];
+}
+
 - (void)sendAllCachedEnvelopes
 {
     SENTRY_LOG_DEBUG(@"sendAllCachedEnvelopes start.");
 
-    @synchronized(self) {
-        if (self.isSending) {
-            SENTRY_LOG_DEBUG(@"Already sending.");
-            return;
-        }
-        if (![self.requestManager isReady]) {
-            SENTRY_LOG_DEBUG(@"Request manager not ready.");
-            return;
-        }
-        self.isSending = YES;
+    if (self.isSending) {
+        SENTRY_LOG_DEBUG(@"Already sending.");
+        return;
     }
+    if (![self.requestManager isReady]) {
+        SENTRY_LOG_DEBUG(@"Request manager not ready.");
+        return;
+    }
+    self.isSending = YES;
 
     SentryEnvelope *envelope;
     NSString *envelopeFilePath;
@@ -375,16 +458,12 @@
     if (envelopePath != nil) {
         [self.fileManager removeFileAtPath:SENTRY_UNWRAP_NULLABLE(NSString, envelopePath)];
     }
-    @synchronized(self) {
-        self.isSending = NO;
-    }
+    self.isSending = NO;
 
     __weak SentryHttpTransport *weakSelf = self;
     dispatch_block_t block = ^{
-        if (weakSelf == nil) {
-            return;
-        }
-        [weakSelf sendAllCachedEnvelopes];
+        SentryHttpTransport *strongSelf = weakSelf;
+        [strongSelf sendAllCachedEnvelopes];
     };
     [self.dispatchQueue dispatchAfter:self.cachedEnvelopeSendDelay block:block];
 }
@@ -397,70 +476,82 @@
     [self.requestManager
                addRequest:request
         completionHandler:^(NSHTTPURLResponse *_Nullable response, NSError *_Nullable error) {
-            if (weakSelf == nil) {
-                SENTRY_LOG_DEBUG(@"WeakSelf is nil. Not doing anything.");
-                return;
-            }
-
-            // When the response is nil, we can't know if the envelope made it successfully to
-            // Sentry. This can happen when there's no connection, or connection was lost during
-            // transmission. In that case, it's OK to retry sending later. See
-            // https://develop.sentry.dev/sdk/expected-features/#dealing-with-network-failures
-            if (response == nil) {
-                SENTRY_LOG_DEBUG(@"Response is nil. Stopping sending and not deleting envelope. "
-                                 @"Will retry sending envelope later.");
-                [weakSelf finishedSending];
-                return;
-            }
-
-            // If we get a response with an error (e.g., a connection dropped while reading the body
-            // or an SSL error after the initial handshake), we must assume the envelope reached
-            // Sentry and only care about the response status codes. Therefore, we intentionally
-            // ignore the error here.
-            if (error != nil) {
-                SENTRY_LOG_DEBUG(@"Response is not nil. We only care about the response and assume "
-                                 @"the envelope arrived at Sentry. Ignoring the error: %@",
-                    error);
-            }
-
-            [weakSelf.rateLimits update:SENTRY_UNWRAP_NULLABLE(NSHTTPURLResponse, response)];
-
-            SENTRY_LOG_DEBUG(@"Received response status code: %li", (long)response.statusCode);
-
-            // Log specific error messages for certain HTTP status codes.
-            // See https://develop.sentry.dev/sdk/expected-features/#dealing-with-network-failures
-            // We didn't want to inline the logic in here, so we can have more Swift code.
-            [SentryHttpTransportHttpStatusCodeLogger
-                logHttpResponseErrorWithStatusCode:response.statusCode
-                                          envelope:envelope
-                                           request:request];
-
-            BOOL is2xx = (response.statusCode >= 200 && response.statusCode < 300);
-            BOOL is4xxOr5xx = (response.statusCode >= 400 && response.statusCode < 600);
-
-            // Relay already records a client report for a 429, so we must not record it again
-            // to avoid double-counting.
-            BOOL isNotRateLimitStatusCode
-                = response.statusCode != SentryHttpStatusCodeTooManyRequests;
-
-            if (is4xxOr5xx && isNotRateLimitStatusCode) {
-                [weakSelf recordLostEventFor:envelope.items];
-            }
-
-            // We must delete the envelope on all 2xx, 4xx and 5xx responses.
-            if (is2xx || is4xxOr5xx) {
-                [weakSelf deleteEnvelopeAndSendNext:envelopePath];
-            } else {
-                [weakSelf finishedSending];
-            }
+            [weakSelf.dispatchQueue dispatchAsyncWithBlock:^{
+                SentryHttpTransport *strongSelf = weakSelf;
+                [strongSelf handleResponse:response
+                                     error:error
+                                  envelope:envelope
+                              envelopePath:envelopePath
+                                   request:request];
+            }];
         }];
+}
+
+- (void)handleResponse:(NSHTTPURLResponse *_Nullable)response
+                 error:(NSError *_Nullable)error
+              envelope:(SentryEnvelope *)envelope
+          envelopePath:(NSString *_Nullable)envelopePath
+               request:(NSURLRequest *)request
+{
+    // When the response is nil, we can't know if the envelope made it successfully to
+    // Sentry. This can happen when there's no connection, or connection was lost during
+    // transmission. In that case, it's OK to retry sending later. See
+    // https://develop.sentry.dev/sdk/expected-features/#dealing-with-network-failures
+    if (response == nil) {
+        SENTRY_LOG_DEBUG(@"Response is nil. Stopping sending and not deleting envelope. "
+                         @"Will retry sending envelope later.");
+        [self finishedSending];
+        return;
+    }
+
+    // If we get a response with an error (e.g., a connection dropped while reading the body
+    // or an SSL error after the initial handshake), we must assume the envelope reached
+    // Sentry and only care about the response status codes. Therefore, we intentionally
+    // ignore the error here.
+    if (error != nil) {
+        SENTRY_LOG_DEBUG(@"Response is not nil. We only care about the response and assume "
+                         @"the envelope arrived at Sentry. Ignoring the error: %@",
+            error);
+    }
+
+    [self.rateLimits update:SENTRY_UNWRAP_NULLABLE(NSHTTPURLResponse, response)];
+
+    SENTRY_LOG_DEBUG(@"Received response status code: %li", (long)response.statusCode);
+
+    // Log specific error messages for certain HTTP status codes.
+    // See https://develop.sentry.dev/sdk/expected-features/#dealing-with-network-failures
+    // We didn't want to inline the logic in here, so we can have more Swift code.
+    [SentryHttpTransportHttpStatusCodeLogger logHttpResponseErrorWithStatusCode:response.statusCode
+                                                                       envelope:envelope
+                                                                        request:request];
+
+    BOOL is2xx = (response.statusCode >= 200 && response.statusCode < 300);
+    BOOL is4xxOr5xx = (response.statusCode >= 400 && response.statusCode < 600);
+
+    // Relay already records a client report for a 429, so we must not record it again
+    // to avoid double-counting.
+    BOOL isNotRateLimitStatusCode = response.statusCode != SentryHttpStatusCodeTooManyRequests;
+
+    if (is4xxOr5xx && isNotRateLimitStatusCode) {
+        [self recordLostEventFor:envelope.items];
+    }
+
+    // We must delete the envelope on all 2xx, 4xx and 5xx responses.
+    if (is2xx || is4xxOr5xx) {
+        [self deleteEnvelopeAndSendNext:envelopePath];
+    } else {
+        [self finishedSending];
+    }
 }
 
 - (void)finishedSending
 {
+    self.isSending = NO;
     @synchronized(self) {
-        self.isSending = NO;
-        [self stopFlushing];
+        SentryHttpTransportFlushState *flush = self.currentFlush;
+        if (flush.activated) {
+            [self completeFlush:flush];
+        }
     }
 }
 
