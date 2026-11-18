@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- Omit cache paths from working-directory and envelope-directory initialization failure messages.
+
 ## 9.24.0
 
 ### Breaking Changes
