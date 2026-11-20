@@ -1,12 +1,38 @@
-# Reader App consent-lifetime distribution
+# Reader App fork extensions (`fork-extensions` branch)
 
-This maintained fork provides the Sentry correction needed by Reader App #2673.
-Deferred crash, hang, and breadcrumb work remains bound to its originating SDK
-lifetime; closing that lifetime seals transport requests. The application retains
-immediate regrant. Cache selection and response transitions share the serial
-transport queue, and each flush owns its registration and completion state
-(`Sources/Sentry/SentryHttpTransport.m` § `sendAllCachedEnvelopes`, `flush:`,
-`completeFlush:`). The source revision is
+This maintained fork carries the Sentry corrections Reader App needs, on top of
+upstream release 9.24.0.
+
+## Branches
+
+- `fork-extensions` is the source of truth: the long-lived integration branch that
+  holds every fork change. Reader App pins a commit on it.
+- `main` mirrors upstream `main` and carries no fork changes.
+- Work branches start from `fork-extensions` and merge back into it. An upstream
+  release is merged into `fork-extensions`, never into a work branch.
+- Earlier work branches (`refactor/2673-consent-lifetime`,
+  `fix/hardened-mach-exceptions`) and the `reader-consent-*` tags stay, because
+  older Reader App pins point at their commits.
+
+## Inventory
+
+| Commit                     | Change                                                                                                                                                                                                                                                                                                                                              | Kind       |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `13c3d7e2d939`             | Deferred crash, watchdog, hang and breadcrumb work stays bound to its originating SDK lifetime; closing that lifetime seals transport requests (`Sources/Sentry/SentryCrashReportSink.m`, `SentryQueueableRequestManager.m`)                                                                                                                        | source fix |
+| `70b36b44ca55`             | Cache selection and response transitions share the serial transport queue; each flush owns its registration and completion state (`Sources/Sentry/SentryHttpTransport.m` § `sendAllCachedEnvelopes`, `flush:`, `completeFlush:`)                                                                                                                    | source fix |
+| `2795d9a5e9fd`             | Directory-initialization failure messages omit the cache path and its consent namespace (`Sources/Sentry/SentryFileManagerHelper.m`)                                                                                                                                                                                                                | source fix |
+| `c8f1ab52085f`             | The Mach exception monitor registers with `EXCEPTION_IDENTITY_PROTECTED` on macOS 12+ and iOS 15+, so a process signed with Enhanced Security `platform-restrictions-string` = 2 is not killed with `EXC_GUARD` (`Sources/SentryCrash/Recording/Monitors/SentryCrashMonitor_MachException.c`). Proven by `scripts/test-hardened-mach-exceptions.sh` | source fix |
+| `2612a86cb9`, `23950a0d01` | Point the binary `Sentry` target at the fork's static archive                                                                                                                                                                                                                                                                                       | packaging  |
+| `81b60242d2`               | Empty commit verifying commit signing                                                                                                                                                                                                                                                                                                               | plumbing   |
+
+Reader App links the source-built `SentrySPM` product, so it gets every source fix
+at its pinned commit. The binary `Sentry` archive described below was built at
+`70b36b44ca55` and predates `2795d9a5e9fd` and `c8f1ab52085f`: a consumer of the
+binary product does not get those two fixes until the archive is rebuilt.
+
+# Binary `Sentry` distribution
+
+The archive is built from source revision
 `70b36b44ca5534622a3ea20e9f63561be546c589`, based on upstream 9.24.0 and retaining
 the ownership/close correction `13c3d7e2d939684431b06b8742f24a41be23bc50`.
 
@@ -51,9 +77,9 @@ checksum, and every extracted file and symlink matched the assembled framework.
 These packaging checks do not replace the application's pending-send, immediate
 regrant, and restart integration tests.
 
-## Upstream contribution
+# Upstream contribution
 
-The ownership, close-seal and drain-ordering source corrections are separable
-from these fork packaging changes. An upstream contribution must be ported to
+The four source fixes in the inventory are separable from the fork packaging
+changes. An upstream contribution must be ported to
 current upstream main and reviewed and tested by a human under `CONTRIBUTING.md`
 before submission. The application's dependency pin remains a separate decision.
