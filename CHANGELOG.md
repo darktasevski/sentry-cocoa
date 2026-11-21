@@ -5,7 +5,7 @@
 ### Fixes
 
 - Omit cache paths from working-directory and envelope-directory initialization failure messages.
-- Fix `EXC_GUARD` termination at SDK start in processes signed with Enhanced Security platform restrictions by registering the Mach exception handler with the identity-protected exception behavior on macOS 12+ and iOS 15+.
+- Fix `EXC_GUARD` termination at SDK start in processes signed with Enhanced Security platform restrictions by registering the Mach exception handler with the identity-protected exception behavior, falling back to the default behavior where the system rejects it.
 
 ## 9.24.0
 

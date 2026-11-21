@@ -146,6 +146,9 @@ typedef union {
     MachExceptionIdentityProtectedMessage identityProtected;
 } MachExceptionReceivedMessage;
 
+/** msgh_id of mach_exception_raise_identity_protected (mach_exc.defs). */
+#    define MACH_EXCEPTION_RAISE_IDENTITY_PROTECTED_ID 2408
+
 /** A mach reply message (according to ux_exception.c, xnu-1699.22.81).
  */
 #    pragma pack(4)
@@ -186,10 +189,6 @@ static struct {
 
 /** Our exception port. */
 static mach_port_t g_exceptionPort = MACH_PORT_NULL;
-
-/** The behavior our exception port is registered with, without
- * MACH_EXCEPTION_CODES. It decides the layout of the received messages. */
-static exception_behavior_t g_exceptionBehavior = EXCEPTION_DEFAULT;
 
 /** Primary exception handler thread. */
 static pthread_t g_primaryPThread;
@@ -234,22 +233,30 @@ restoreExceptionPorts(void)
     g_previousExceptionPorts.count = 0;
 }
 
-/** The exception behavior to register our port with.
+/** Register our port for the given exception mask.
  *
- * A process under Enhanced Security platform restrictions (and any platform
- * binary) is killed with EXC_GUARD (kGUARD_EXC_EXCEPTION_BEHAVIOR_ENFORCE) when
- * it registers an exception port with a behavior that hands out thread and task
- * control ports, such as EXCEPTION_DEFAULT. The identity-protected behavior is
- * accepted everywhere the kernel supports it, so it is used on every OS that
- * has it.
+ * A process under Enhanced Security platform restrictions is killed with
+ * EXC_GUARD (kGUARD_EXC_EXCEPTION_BEHAVIOR_ENFORCE) when it registers an
+ * exception port with a behavior that hands out thread and task control ports,
+ * such as EXCEPTION_DEFAULT. Nothing public tells whether the restrictions
+ * apply, so the identity-protected behavior is always tried first. Rosetta
+ * rejects it with KERN_INVALID_ARGUMENT and does not enforce the restrictions,
+ * so translated processes fall back to EXCEPTION_DEFAULT. See
+ * exception_is_identity_protected in xnu's osfmk/kern/ipc_tt.c.
  */
-static exception_behavior_t
-exceptionBehavior(void)
+static kern_return_t
+setExceptionPort(const task_t task, const exception_mask_t mask)
 {
-    if (__builtin_available(macOS 12.0, iOS 15.0, *)) {
-        return EXCEPTION_IDENTITY_PROTECTED;
+    kern_return_t kr = task_set_exception_ports(task, mask, g_exceptionPort,
+        (int)(EXCEPTION_IDENTITY_PROTECTED | MACH_EXCEPTION_CODES), THREAD_STATE_NONE);
+    if (kr != KERN_INVALID_ARGUMENT) {
+        return kr;
     }
-    return EXCEPTION_DEFAULT;
+
+    SENTRY_ASYNC_SAFE_LOG_DEBUG(
+        "Identity-protected exception behavior rejected, using the default behavior.");
+    return task_set_exception_ports(task, mask, g_exceptionPort,
+        (int)(EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES), THREAD_STATE_NONE);
 }
 
 /** Find the thread with the given THREAD_IDENTIFIER_INFO thread ID.
@@ -422,7 +429,8 @@ handleExceptions(void *const userData)
         SENTRY_ASYNC_SAFE_LOG_ERROR("mach_msg: %s", mach_error_string(kr));
     }
 
-    const bool isIdentityProtected = g_exceptionBehavior == EXCEPTION_IDENTITY_PROTECTED;
+    const bool isIdentityProtected
+        = exceptionMessage.header.msgh_id == MACH_EXCEPTION_RAISE_IDENTITY_PROTECTED_ID;
     const exception_type_t exception = isIdentityProtected
         ? exceptionMessage.identityProtected.exception
         : exceptionMessage.standard.exception;
@@ -473,10 +481,16 @@ handleExceptions(void *const userData)
         const thread_t crashedThread = isIdentityProtected
             ? threadWithID(exceptionMessage.identityProtected.threadID)
             : exceptionMessage.standard.thread.name;
+        // Fill the context even without a thread: it is uninitialized stack storage, and the
+        // report writer reads it through offendingMachineContext.
+        const bool contextFilled
+            = sentrycrashmc_getContextForThread(crashedThread, machineContext, true);
+        const bool hasThreadContext = crashedThread != THREAD_NULL && contextFilled;
         if (crashedThread == THREAD_NULL) {
+            // No thread here matches when the exception came from another task, such as a
+            // forked child that inherited our ports.
             SENTRY_ASYNC_SAFE_LOG_ERROR("Could not find the thread that raised the exception.");
-        }
-        if (sentrycrashmc_getContextForThread(crashedThread, machineContext, true)) {
+        } else if (hasThreadContext) {
             sentrycrashsc_initWithMachineContext(
                 &g_stackCursor, MAX_STACKTRACE_LENGTH, machineContext);
             SENTRY_ASYNC_SAFE_LOG_TRACE("Fault address %p, instruction address %p",
@@ -492,7 +506,7 @@ handleExceptions(void *const userData)
         SENTRY_ASYNC_SAFE_LOG_DEBUG("Filling out context.");
         crashContext->crashType = SentryCrashMonitorTypeMachException;
         crashContext->eventID = eventID;
-        crashContext->registersAreValid = true;
+        crashContext->registersAreValid = hasThreadContext;
         crashContext->mach.type = exception;
         crashContext->mach.code = codes[0] & (int64_t)MACH_ERROR_CODE_MASK;
         crashContext->mach.subcode = codes[1] & (int64_t)MACH_ERROR_CODE_MASK;
@@ -615,9 +629,7 @@ installExceptionHandler(void)
     }
 
     SENTRY_ASYNC_SAFE_LOG_DEBUG("Installing port as exception handler.");
-    g_exceptionBehavior = exceptionBehavior();
-    kr = task_set_exception_ports(thisTask, mask, g_exceptionPort,
-        (int)(g_exceptionBehavior | MACH_EXCEPTION_CODES), THREAD_STATE_NONE);
+    kr = setExceptionPort(thisTask, mask);
     if (kr != KERN_SUCCESS) {
         SENTRY_ASYNC_SAFE_LOG_ERROR("task_set_exception_ports: %s", mach_error_string(kr));
         goto failed;
